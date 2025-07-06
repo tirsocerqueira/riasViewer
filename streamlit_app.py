@@ -1,151 +1,223 @@
+import requests
 import streamlit as st
 import pandas as pd
-import math
-from pathlib import Path
+import folium
+from folium.plugins import MarkerCluster
+import branca.colormap as cm
+from pandas import json_normalize
+import asyncio
+from playwright.async_api import async_playwright
+from streamlit_folium import st_folium
+from streamlit_autorefresh import st_autorefresh
+import altair as alt
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+st_autorefresh(interval=300000, key="datarefresh")
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+st.set_page_config(layout="wide")
+st.title("🌊 RiasViewer")
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+# ---------- FUNCIONES ----------
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+async def scrape_and_flatten_json(url):
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            await page.set_extra_http_headers({"User-Agent": "Mozilla/5.0"})
+            response = await page.goto(url)
+            if not response or response.status != 200:
+                raise Exception(f"HTTP status: {response.status if response else 'no response'}")
+            data = await response.json()
+            await browser.close()
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+            key = 'data'
+            if key in data:
+                df = json_normalize(data[key])
+            else:
+                df = json_normalize(data)
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+            df_lista = []
+            for i in df.columns:
+                valor = df.loc[0, i]
+                if isinstance(valor, list) and len(valor) > 0 and isinstance(valor[0], dict):
+                    df_temp = pd.DataFrame(valor)
+                    df_lista.append(df_temp)
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
+            return pd.concat(df_lista, ignore_index=True) if df_lista else pd.DataFrame()
+
+    except Exception as e:
+        return pd.DataFrame()
+
+def run_scraping_sync(url):
+    try:
+        return asyncio.run(scrape_and_flatten_json(url))
+    except RuntimeError:
+        loop = asyncio.get_event_loop()
+        return loop.run_until_complete(scrape_and_flatten_json(url))
+
+@st.cache_data(ttl=300)
+def get_data(x_min, x_max, y_min, y_max, zoom):
+    df_list = []
+    total_urls = (x_max - x_min + 1) * (y_max - y_min + 1)
+    count = 0
+    progress = st.progress(0, text="Cargando datos...")
+
+    for x in range(x_min, x_max + 1):
+        for y in range(y_min, y_max + 1):
+            url = f'https://www.marinetraffic.com/getData/get_data_json_4/z:{zoom}/X:{x}/Y:{y}/station:0'
+            df = run_scraping_sync(url)
+            if not df.empty:
+                df_list.append(df)
+            count += 1
+            progress.progress(count / total_urls, text=f"{count}/{total_urls} coordenadas procesadas...")
+
+    progress.empty()
+
+    if df_list:
+        df_final = pd.concat(df_list, ignore_index=True)
+        df_final['LAT'] = pd.to_numeric(df_final['LAT'], errors='coerce')
+        df_final['LON'] = pd.to_numeric(df_final['LON'], errors='coerce')
+        df_final['SPEED'] = pd.to_numeric(df_final['SPEED'], errors='coerce') / 10
+        df_final = df_final.dropna(subset=['LAT', 'LON', 'SPEED'])
+        return df_final
+    else:
+        return pd.DataFrame()
+
+# ---------- PARÁMETROS DE MAPA ----------
+X_min = 1946
+X_max = 1950
+Y_min = 1516
+Y_max = 1518
+zoom = 13
+
+# ---------- OBTENER DATOS ----------
+df_final = get_data(int(X_min), int(X_max), int(Y_min), int(Y_max), zoom)
+
+if df_final.empty:
+    st.warning("No existen datos válidos.")
+else:
+    st.success(f"✅ {len(df_final)} barcos encontrados.")
+    st.session_state['df_final'] = df_final
+
+    # ---------- FILTROS EN LA PÁGINA (NO EN SIDEBAR) ----------
+    st.subheader("⚙️ Filtros de visualización")
+    filtro_estado = st.radio(
+        "Mostrar:",
+        ["Todos los barcos", "Solo en movimiento", "Solo atracados"],
+        horizontal=True
     )
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+    if filtro_estado == "Solo en movimiento":
+        df_final = df_final[df_final['SPEED'] >= 5]
+    elif filtro_estado == "Solo atracados":
+        df_final = df_final[df_final['SPEED'] < 5]
 
-    return gdp_df
+    # ---------- ESTADÍSTICAS ----------
+    st.subheader("📊 Estadísticas de tráfico marítimo")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("🚢 Barcos mostrados", len(df_final))
+    col2.metric("📈 Velocidad media", f"{df_final['SPEED'].mean():.2f} knots")
+    col3.metric("🐢 Barcos lentos (<5 knots)", len(df_final[df_final['SPEED'] < 5]))
 
-gdp_df = get_gdp_data()
+    if (df_final['SPEED'] > 30).any():
+        st.warning("🚨 Hay barcos con velocidad mayor a 30 knots.")
+    if (df_final['SPEED'] == 0).any():
+        st.info("⚓ Algunos barcos están completamente detenidos.")
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
+    # ---------- GRÁFICO DE VELOCIDAD ----------
+    st.subheader("📉 Distribución de velocidad")
+    chart = alt.Chart(df_final).mark_bar().encode(
+        alt.X("SPEED:Q", bin=alt.Bin(maxbins=30), title="Velocidad (knots)"),
+        alt.Y("count()", title="Número de barcos")
+    ).properties(width=700, height=300)
+    st.altair_chart(chart)
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
+    # ---------- MAPA ----------
+    st.subheader("🗺️ Mapa de barcos")
+    mapa = folium.Map(
+        location=[df_final['LAT'].mean(), df_final['LON'].mean()],
+        zoom_start=12,
+        tiles=None
+    )
 
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
+    folium.TileLayer(
+        tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+        attr='Esri', name='Satélite (Esri)', overlay=False, control=True, show=True
+    ).add_to(mapa)
 
-# Add some spacing
-''
-''
+    folium.TileLayer('CartoDB positron', name='Mapa claro', overlay=False, control=True).add_to(mapa)
 
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
+    layer_speed = folium.FeatureGroup(name='Barcos (Velocidad)', overlay=True, show=False)
+    layer_slow = folium.FeatureGroup(name='Barcos Atracados', overlay=True, show=False)
+    layer_moving = folium.FeatureGroup(name='Barcos en Movimiento', overlay=True, show=False)
+    marker_cluster = MarkerCluster(name='Cluster de barcos', overlay=True).add_to(mapa)
 
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
+    colormap = cm.LinearColormap(['green', 'yellow', 'red'],
+                                 vmin=df_final['SPEED'].min(),
+                                 vmax=df_final['SPEED'].max())
+    colormap.caption = 'Velocidad del barco (knots)'
+    colormap.add_to(mapa)
 
-countries = gdp_df['Country Code'].unique()
+    for _, row in df_final.iterrows():
+        try:
+            name = row.get('SHIPNAME', 'Desconocido')
+            speed = row['SPEED']
 
-if not len(countries):
-    st.warning("Select at least one country")
+            folium.CircleMarker(
+                location=[row['LAT'], row['LON']],
+                radius=6,
+                color=colormap(speed),
+                fill=True,
+                fill_color=colormap(speed),
+                fill_opacity=0.8,
+                popup=f"🚢 {name}<br>⚡ {speed:.2f} knots"
+            ).add_to(layer_speed)
 
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
+            if speed < 5:
+                folium.Circle(
+                    location=[row['LAT'], row['LON']],
+                    radius=100,
+                    color='orange',
+                    fill=True,
+                    fill_color='orange',
+                    fill_opacity=0.6,
+                    popup=f"🐢 Barco lento<br>🚢 {name}<br>⚡ {speed:.2f} knots"
+                ).add_to(layer_slow)
+            else:
+                folium.CircleMarker(
+                    location=[row['LAT'], row['LON']],
+                    radius=7,
+                    color='lime',
+                    fill=True,
+                    fill_color='lime',
+                    fill_opacity=0.9,
+                    popup=f"🚀 Barco en movimiento<br>🚢 {name}<br>⚡ {speed:.2f} knots"
+                ).add_to(layer_moving)
 
-''
-''
-''
+            folium.Marker(
+                location=[row['LAT'], row['LON']],
+                popup=f"🚢 {name}<br>⚡ {speed:.2f} knots",
+                icon=folium.Icon(color='green', icon='anchor', prefix='fa')
+            ).add_to(marker_cluster)
+        except Exception as e:
+            st.warning(f"Error al agregar marcador: {e}")
 
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
+    mapa.add_child(layer_speed)
+    mapa.add_child(layer_slow)
+    mapa.add_child(layer_moving)
+    folium.LayerControl(collapsed=False).add_to(mapa)
 
-st.header('GDP over time', divider='gray')
+    st_folium(mapa, width=1200, height=700)
 
-''
+    # ---------- TABLA Y DESCARGA ----------
+    st.subheader("📋 Datos tabulados")
+    st.dataframe(df_final)
 
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+    st.subheader("⬇️ Descargar datos")
+    csv = df_final.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="📥 Descargar CSV",
+        data=csv,
+        file_name="barcos_marine_traffic.csv",
+        mime='text/csv'
+    )

@@ -1,8 +1,6 @@
-# :earth_americas: GDP dashboard template
+# :earth_americas: RiasViewer
 
-A simple Streamlit app showing the GDP of different countries in the world.
-
-[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://gdp-dashboard-template.streamlit.app/)
+A simple Streamlit app showing AIS Boats latest info in Ria de Vigo
 
 ### How to run it on your own machine
 
