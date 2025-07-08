@@ -95,13 +95,25 @@ def get_data(x_min, x_max, y_min, y_max, zoom):
     else:
         return pd.DataFrame()
 
-# ---------- OBTENER DATOS ----------
-df_final = get_data(X_min, X_max, Y_min, Y_max, zoom)
+# ---------- BOTÓN PARA ACTUALIZAR DATOS ----------
 
-if not df_final.empty:
-    st.session_state['last_run'] = datetime.datetime.now()
-    st.success(f"✅ {len(df_final)} barcos encontrados.")
+if st.button("🔄 Actualizar datos"):
+    st.cache_data.clear()  # Limpia la caché para forzar recarga
+    df_final = get_data(X_min, X_max, Y_min, Y_max, zoom)
     st.session_state['df_final'] = df_final
+    st.session_state['last_run'] = datetime.datetime.now()
+else:
+    if 'df_final' in st.session_state:
+        df_final = st.session_state['df_final']
+    else:
+        df_final = get_data(X_min, X_max, Y_min, Y_max, zoom)
+        st.session_state['df_final'] = df_final
+
+# ---------- OBTENER DATOS ----------
+if not df_final.empty:
+    if 'last_run' not in st.session_state:
+        st.session_state['last_run'] = datetime.datetime.now()
+    st.success(f"✅ {len(df_final)} barcos encontrados.")
 else:
     st.warning("No existen datos válidos.")
 
