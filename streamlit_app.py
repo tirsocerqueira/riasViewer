@@ -12,10 +12,12 @@ from streamlit_autorefresh import st_autorefresh
 import altair as alt
 import datetime
 
+
+st.set_page_config(layout="wide")
+
 # Auto-refresh cada 5 minutos (solo una vez)
 st_autorefresh(interval=300000, limit=1, key="autorefresh")
 
-st.set_page_config(layout="wide")
 st.title("🌊 RiasViewer")
 
 # ---------- FUNCIONES ----------
