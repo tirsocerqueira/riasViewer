@@ -10,8 +10,10 @@ from playwright.async_api import async_playwright
 from streamlit_folium import st_folium
 from streamlit_autorefresh import st_autorefresh
 import altair as alt
+import datetime
 
-st_autorefresh(interval=300000, key="datarefresh")
+# Auto-refresh cada 5 minutos (solo una vez)
+st_autorefresh(interval=300000, limit=1, key="autorefresh")
 
 st.set_page_config(layout="wide")
 st.title("🌊 RiasViewer")
@@ -55,6 +57,14 @@ def run_scraping_sync(url):
         loop = asyncio.get_event_loop()
         return loop.run_until_complete(scrape_and_flatten_json(url))
 
+# ---------- PARÁMETROS DE MAPA ----------
+X_min = 1946
+X_max = 1950
+Y_min = 1516
+Y_max = 1518
+zoom = 13
+
+# ---------- CARGAR DATOS (con cache 5 min) ----------
 @st.cache_data(ttl=300)
 def get_data(x_min, x_max, y_min, y_max, zoom):
     df_list = []
@@ -83,23 +93,23 @@ def get_data(x_min, x_max, y_min, y_max, zoom):
     else:
         return pd.DataFrame()
 
-# ---------- PARÁMETROS DE MAPA ----------
-X_min = 1946
-X_max = 1950
-Y_min = 1516
-Y_max = 1518
-zoom = 13
-
 # ---------- OBTENER DATOS ----------
-df_final = get_data(int(X_min), int(X_max), int(Y_min), int(Y_max), zoom)
+df_final = get_data(X_min, X_max, Y_min, Y_max, zoom)
 
-if df_final.empty:
-    st.warning("No existen datos válidos.")
-else:
+if not df_final.empty:
+    st.session_state['last_run'] = datetime.datetime.now()
     st.success(f"✅ {len(df_final)} barcos encontrados.")
     st.session_state['df_final'] = df_final
+else:
+    st.warning("No existen datos válidos.")
 
-    # ---------- FILTROS EN LA PÁGINA (NO EN SIDEBAR) ----------
+if 'last_run' in st.session_state:
+    st.markdown(f"Última ejecución exitosa: **{st.session_state['last_run'].strftime('%Y-%m-%d %H:%M:%S')}**")
+else:
+    st.markdown("No hay registro de ejecución previa.")
+
+# ---------- FILTROS ----------
+if not df_final.empty:
     st.subheader("⚙️ Filtros de visualización")
     filtro_estado = st.radio(
         "Mostrar:",
@@ -133,7 +143,7 @@ else:
     st.altair_chart(chart)
 
     # ---------- MAPA ----------
-    st.subheader("🗺️ Mapa de barcos")
+    st.subheader("🗌️ Mapa de barcos")
     mapa = folium.Map(
         location=[df_final['LAT'].mean(), df_final['LON'].mean()],
         zoom_start=12,
@@ -142,7 +152,7 @@ else:
 
     folium.TileLayer(
         tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-        attr='Esri', name='Satélite (Esri)', overlay=False, control=True, show=True
+        attr='Esri', name='Satélite (Esri)', overlay=True, control=True, show=True
     ).add_to(mapa)
 
     folium.TileLayer('CartoDB positron', name='Mapa claro', overlay=False, control=True).add_to(mapa)
@@ -207,16 +217,29 @@ else:
     mapa.add_child(layer_moving)
     folium.LayerControl(collapsed=False).add_to(mapa)
 
-    st_folium(mapa, width=1200, height=700)
+    st_folium(mapa, use_container_width=True, height=600)
 
     # ---------- TABLA Y DESCARGA ----------
-    st.subheader("📋 Datos tabulados")
-    st.dataframe(df_final)
+    with st.expander("📋 Ver tabla de barcos", expanded=True):
+        columnas_mostrar = ['SHIPNAME', 'SPEED', 'COURSE', 'SHIPTYPE', 'DESTINATION', 'FLAG']
+        columnas_mostrar = [col for col in columnas_mostrar if col in df_final.columns]
+
+        nombres_columnas = {
+            'SHIPNAME': 'Nombre del barco',
+            'SPEED': 'Velocidad (knots)',
+            'COURSE': 'Dirección (°)',
+            'SHIPTYPE': 'Tipo de barco',
+            'DESTINATION': 'Destino',
+            'FLAG': 'Bandera'
+        }
+
+        df_mostrar = df_final[columnas_mostrar].rename(columns=nombres_columnas)
+        st.dataframe(df_mostrar, use_container_width=True, height=1200)
 
     st.subheader("⬇️ Descargar datos")
-    csv = df_final.to_csv(index=False).encode('utf-8')
+    csv = df_mostrar.to_csv(index=False).encode('utf-8')
     st.download_button(
-        label="📥 Descargar CSV",
+        label="📅 Descargar CSV",
         data=csv,
         file_name="barcos_marine_traffic.csv",
         mime='text/csv'
